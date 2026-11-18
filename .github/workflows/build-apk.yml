@@ -1,0 +1,92 @@
+name: Build Android prototype
+
+# Run it by hand: Actions tab > Build Android prototype > Run workflow.
+# It takes the web app from Rodart265/bajeti-yanga, wraps it with Capacitor and
+# builds a debug APK you can install on your phone. Nothing here changes the web repo.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Get the web app
+        uses: actions/checkout@v4
+        with:
+          repository: Rodart265/bajeti-yanga
+          path: web
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Copy the files the app needs into www
+        run: |
+          mkdir -p www
+          cp web/index.html web/styles.css web/glass.css web/manifest.webmanifest www/
+          cp -r web/js web/vendor web/icons www/
+          echo "Web app version:"
+          grep -m1 -o "APP_VERSION *= *'[^']*'" www/js/*.js || true
+          ls -R www | head -50
+
+      - name: Create the Capacitor project
+        run: |
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.rodart.bajetiyanga",
+            "appName": "Bajeti Yanga",
+            "webDir": "www",
+            "server": { "androidScheme": "https" }
+          }
+          EOF
+          npx cap add android
+          npx cap sync android
+
+      - name: Allow the camera (receipt scan and QR join)
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' "$M"
+          sed -i 's#<uses-permission android:name="android.permission.INTERNET" />#&\n    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />#' "$M"
+          grep -q 'android.permission.CAMERA' "$M"
+          cat "$M"
+
+      - name: Set the version number
+        run: |
+          G=android/app/build.gradle
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/; s/versionName \"1.0\"/versionName \"0.1.${{ github.run_number }}\"/" "$G"
+          grep -n "versionCode\|versionName" "$G"
+
+      - name: Build the APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Keep the APK as a download
+        uses: actions/upload-artifact@v4
+        with:
+          name: bajeti-yanga-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish it as a release so you can tap and download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk bajeti-yanga-prototype.apk
+          gh release create "prototype-${{ github.run_number }}" bajeti-yanga-prototype.apk \
+            --repo "${{ github.repository }}" \
+            --title "Prototype ${{ github.run_number }}" \
+            --notes "Debug build for testing only. Not signed for stores." \
+            --prerelease
